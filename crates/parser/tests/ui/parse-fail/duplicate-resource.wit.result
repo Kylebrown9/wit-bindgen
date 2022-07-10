@@ -1,4 +1,4 @@
-resource "a" defined twice
+type name "a" previously defined as a type
      --> tests/ui/parse-fail/duplicate-resource.wit:4:10
       |
     4 | resource a

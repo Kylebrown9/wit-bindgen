@@ -30,6 +30,8 @@ impl SizeAlign {
             TypeDefKind::Option(t) => self.variant(Int::U8, [&Type::Unit, t]),
             TypeDefKind::Expected(e) => self.variant(Int::U8, [&e.ok, &e.err]),
             TypeDefKind::Union(u) => self.variant(u.tag(), u.cases.iter().map(|c| &c.ty)),
+            // A resource is represented by an index
+            TypeDefKind::Resource(_) => (4, 4),
             // A stream is represented as an index.
             TypeDefKind::Stream(_) => (4, 4),
         }
@@ -40,7 +42,7 @@ impl SizeAlign {
             Type::Unit => 0,
             Type::Bool | Type::U8 | Type::S8 => 1,
             Type::U16 | Type::S16 => 2,
-            Type::U32 | Type::S32 | Type::Float32 | Type::Char | Type::Handle(_) => 4,
+            Type::U32 | Type::S32 | Type::Float32 | Type::Char => 4,
             Type::U64 | Type::S64 | Type::Float64 | Type::String => 8,
             Type::Id(id) => self.map[id.index()].0,
         }
@@ -50,7 +52,7 @@ impl SizeAlign {
         match ty {
             Type::Unit | Type::Bool | Type::U8 | Type::S8 => 1,
             Type::U16 | Type::S16 => 2,
-            Type::U32 | Type::S32 | Type::Float32 | Type::Char | Type::Handle(_) | Type::String => {
+            Type::U32 | Type::S32 | Type::Float32 | Type::Char | Type::String => {
                 4
             }
             Type::U64 | Type::S64 | Type::Float64 => 8,

@@ -286,6 +286,7 @@ impl Hash for TypeDefKey<'_> {
                     .hash(state);
                 }
             }
+            TypeDefKind::Resource(_) => todo!("hash for resource"),
             TypeDefKind::Stream(_) => todo!("hash for stream"),
         }
     }
@@ -440,7 +441,7 @@ impl<'a> TypeEncoder<'a> {
 
             let mut instance = Some(InstanceTypeEncoder::default());
 
-            for func in &import.functions {
+            for (_, func) in &import.functions {
                 Self::validate_function(func)?;
 
                 let index = self.encode_func_type(import, func, &mut instance)?;
@@ -473,7 +474,7 @@ impl<'a> TypeEncoder<'a> {
 
             // TODO: stick interface documentation in a custom section?
 
-            for func in &export.functions {
+            for (_, func) in &export.functions {
                 Self::validate_function(func)?;
 
                 let index = self.encode_func_type(export, func, &mut instance)?;
@@ -576,6 +577,7 @@ impl<'a> TypeEncoder<'a> {
                             ComponentValType::Type(index)
                         }
                         TypeDefKind::Type(ty) => self.encode_valtype(interface, instance, ty)?,
+                        TypeDefKind::Resource(_) => bail!("the use of handle types in interfaces is not currently supported"),
                         TypeDefKind::Stream(_) => todo!("encoding for stream type"),
                     };
 
@@ -608,9 +610,6 @@ impl<'a> TypeEncoder<'a> {
                 }
 
                 encoded
-            }
-            Type::Handle(_) => {
-                bail!("the use of handle types in interfaces is not currently supported")
             }
         })
     }
@@ -775,7 +774,7 @@ impl<'a> TypeEncoder<'a> {
     }
 
     fn validate_interface(interface: &Interface) -> Result<()> {
-        if interface.resources.len() != 0 {
+        if interface.types.iter().any(|(_, t)| matches!(t.kind, TypeDefKind::Resource(_))) {
             bail!("the use of resources in interfaces is not currently not supported");
         }
 
@@ -857,6 +856,7 @@ impl RequiredOptions {
                     Self::for_type(interface, t) | Self::Realloc
                 }
                 TypeDefKind::Type(t) => Self::for_type(interface, t),
+                TypeDefKind::Resource(_) => todo!("encoding for resource"),
                 TypeDefKind::Stream(_) => todo!("encoding for stream"),
             },
             Type::String => Self::All,
@@ -1097,7 +1097,7 @@ impl EncodingState {
             let mut aliases = AliasSection::new();
             let mut functions = CanonicalFunctionSection::new();
             let mut interface_exports = Vec::new();
-            for func in &export.functions {
+            for (_, func) in &export.functions {
                 let name =
                     expected_export_name((!is_default).then(|| export.name.as_str()), &func.name);
 
@@ -1526,7 +1526,7 @@ impl<'a> ImportEncoder<'a> {
             indexmap::map::Entry::Vacant(e) => {
                 let mut direct = Vec::new();
                 let mut indirect = Vec::new();
-                for f in &interface.functions {
+                for (_, f) in &interface.functions {
                     let sig = interface.wasm_signature(AbiVariant::GuestImport, f);
                     let options = RequiredOptions::for_function(interface, f)
                         | (if sig.retptr || sig.indirect_params {

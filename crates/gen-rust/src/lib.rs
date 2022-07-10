@@ -149,38 +149,7 @@ pub trait RustGenerator {
     fn print_ty(&mut self, iface: &Interface, ty: &Type, mode: TypeMode) {
         match ty {
             Type::Id(t) => self.print_tyid(iface, *t, mode),
-            Type::Handle(r) => {
-                let mut info = TypeInfo::default();
-                info.has_handle = true;
-                let lt = self.lifetime_for(&info, mode);
-                // Borrowed handles are always behind a reference since
-                // in that case we never take ownership of the handle.
-                if let Some(lt) = lt {
-                    self.push_str("&");
-                    if lt != "'_" {
-                        self.push_str(lt);
-                    }
-                    self.push_str(" ");
-                }
 
-                let suffix = match self.handle_wrapper() {
-                    Some(wrapper) => {
-                        self.push_str(wrapper);
-                        self.push_str("<");
-                        ">"
-                    }
-                    None => "",
-                };
-                if self.handle_in_super() {
-                    self.push_str("super::");
-                }
-                if let Some((proj, _)) = self.handle_projection() {
-                    self.push_str(proj);
-                    self.push_str("::");
-                }
-                self.push_str(&iface.resources[*r].name.to_camel_case());
-                self.push_str(suffix);
-            }
 
             Type::Unit => self.push_str("()"),
             Type::Bool => self.push_str("bool"),
@@ -204,12 +173,53 @@ pub trait RustGenerator {
         }
     }
 
+    fn print_handle(&mut self, iface: &Interface, id: TypeId, mode: TypeMode) { //TODO-Kyle
+        let mut info = TypeInfo::default();
+        info.has_handle = true;
+        let lt = self.lifetime_for(&info, mode);
+        // Borrowed handles are always behind a reference since
+        // in that case we never take ownership of the handle.
+        if let Some(lt) = lt {
+            self.push_str("&");
+            if lt != "'_" {
+                self.push_str(lt);
+            }
+            self.push_str(" ");
+        }
+
+        let suffix = match self.handle_wrapper() {
+            Some(wrapper) => {
+                self.push_str(wrapper);
+                self.push_str("<");
+                ">"
+            }
+            None => "",
+        };
+        if self.handle_in_super() {
+            self.push_str("super::");
+        }
+        if let Some((proj, _)) = self.handle_projection() {
+            self.push_str(proj);
+            self.push_str("::");
+        }
+        let (name, _) = iface.get_resource(id);
+        self.push_str(&name.to_camel_case());
+        self.push_str(suffix);
+    }
+
     fn print_tyid(&mut self, iface: &Interface, id: TypeId, mode: TypeMode) {
         let info = self.info(id);
         let lt = self.lifetime_for(&info, mode);
         let ty = &iface.types[id];
+
+        if let TypeDefKind::Resource(_) = ty.kind {
+            self.print_handle(iface, id, mode);
+            return;
+        }
+
         if ty.name.is_some() {
             let name = if lt.is_some() {
+                self.push_str("// foobar\n");
                 self.param_name(iface, id)
             } else {
                 self.result_name(iface, id)
@@ -239,8 +249,8 @@ pub trait RustGenerator {
                     | TypeDefKind::Union(_) => true,
                     TypeDefKind::Type(Type::Id(t)) => needs_generics(iface, &iface.types[*t].kind),
                     TypeDefKind::Type(Type::String) => true,
-                    TypeDefKind::Type(Type::Handle(_)) => true,
                     TypeDefKind::Type(_) => false,
+                    TypeDefKind::Resource(_) => false // TODO-Kyle
                 }
             }
         }
@@ -289,6 +299,9 @@ pub trait RustGenerator {
             }
             TypeDefKind::Stream(_) => {
                 todo!("unsupported anonymous type reference: stream")
+            }
+            TypeDefKind::Resource(_) => {
+                todo!("unsupported anonymous type reference: resource")
             }
 
             TypeDefKind::Type(t) => self.print_ty(iface, t, mode),
@@ -398,7 +411,6 @@ pub trait RustGenerator {
             Type::Float64 => out.push_str("F64"),
             Type::Char => out.push_str("Char"),
             Type::String => out.push_str("String"),
-            Type::Handle(id) => out.push_str(&iface.resources[*id].name.to_camel_case()),
             Type::Id(id) => {
                 let ty = &iface.types[*id];
                 match &ty.name {
@@ -425,6 +437,8 @@ pub trait RustGenerator {
                         TypeDefKind::Variant(_) => out.push_str("Variant"),
                         TypeDefKind::Enum(_) => out.push_str("Enum"),
                         TypeDefKind::Union(_) => out.push_str("Union"),
+
+                        TypeDefKind::Resource(_) => unreachable!("Resources must be named")
                     },
                 }
             }

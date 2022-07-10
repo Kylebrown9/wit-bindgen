@@ -18,7 +18,7 @@ type t15 = expected<u32, u32>
 type t16 = expected<unit, u32>
 type t17 = expected<u32, unit>
 type t18 = expected<unit, unit>
-type t19 = handle x
+type t19 = x
 record t20 {}
 record t21 { a: u32 }
 record t22 { a: u32, }

@@ -18,8 +18,8 @@ pub struct Js {
     intrinsics: BTreeMap<Intrinsic, String>,
     all_intrinsics: BTreeSet<Intrinsic>,
     needs_get_export: bool,
-    imported_resources: BTreeSet<ResourceId>,
-    exported_resources: BTreeSet<ResourceId>,
+    imported_resources: BTreeSet<TypeId>,
+    exported_resources: BTreeSet<TypeId>,
     needs_ty_option: bool,
     needs_ty_result: bool,
 }
@@ -27,13 +27,13 @@ pub struct Js {
 #[derive(Default)]
 struct Imports {
     freestanding_funcs: Vec<(String, Source)>,
-    resource_funcs: BTreeMap<ResourceId, Vec<(String, Source)>>,
+    resource_funcs: BTreeMap<TypeId, Vec<(String, Source)>>,
 }
 
 #[derive(Default)]
 struct Exports {
     freestanding_funcs: Vec<Source>,
-    resource_funcs: BTreeMap<ResourceId, Vec<Source>>,
+    resource_funcs: BTreeMap<TypeId, Vec<Source>>,
 }
 
 #[derive(Default, Debug, Clone)]
@@ -137,7 +137,6 @@ impl Js {
             Type::Float32 => Some("Float32Array"),
             Type::Float64 => Some("Float64Array"),
             Type::Char => None,
-            Type::Handle(_) => None,
             Type::String => None,
             Type::Id(id) => match &iface.types[*id].kind {
                 TypeDefKind::Type(t) => self.array_ty(iface, t),
@@ -160,7 +159,6 @@ impl Js {
             | Type::Float64 => self.src.ts("number"),
             Type::U64 | Type::S64 => self.src.ts("bigint"),
             Type::Char => self.src.ts("string"),
-            Type::Handle(id) => self.src.ts(&iface.resources[*id].name.to_camel_case()),
             Type::String => self.src.ts("string"),
             Type::Id(id) => {
                 let ty = &iface.types[*id];
@@ -195,6 +193,7 @@ impl Js {
                     }
                     TypeDefKind::Variant(_) => panic!("anonymous variant"),
                     TypeDefKind::List(v) => self.print_list(iface, v),
+                    TypeDefKind::Resource(_) => unreachable!("Resources are never anonymous"),
                     TypeDefKind::Stream(_) => todo!("anonymous stream"),
                 }
             }
@@ -570,7 +569,7 @@ impl Generator for Js {
         self.src.ts(";\n");
     }
 
-    fn type_resource(&mut self, _iface: &Interface, ty: ResourceId) {
+    fn type_resource(&mut self, _iface: &Interface, ty: TypeId) {
         if !self.in_import {
             self.exported_resources.insert(ty);
         }
@@ -822,6 +821,7 @@ impl Generator for Js {
             }
             for resource in self.imported_resources.clone() {
                 let slab = self.intrinsic(Intrinsic::Slab);
+                let (resource_name, _) = iface.get_resource(resource);
                 self.src.js(&format!(
                     "
                         const resources{idx} = new {slab}();
@@ -831,25 +831,25 @@ impl Generator for Js {
                                 obj.drop{camel}(val);
                         }};
                     ",
-                    name = iface.resources[resource].name,
-                    camel = iface.resources[resource].name.to_camel_case(),
+                    name = resource_name,
+                    camel = resource_name.to_camel_case(),
                     idx = resource.index(),
                     slab = slab,
                 ));
                 self.src.ts(&format!(
                     "drop{}?: (val: {0}) => void;\n",
-                    iface.resources[resource].name.to_camel_case()
+                    resource_name.to_camel_case()
                 ));
             }
             self.src.js("}");
             self.src.ts("}\n");
 
-            for (resource, _) in iface.resources.iter() {
+            for (resource_id, name, _) in iface.resources() {
                 self.src.ts(&format!(
                     "export interface {} {{\n",
-                    iface.resources[resource].name.to_camel_case()
+                    name.to_camel_case()
                 ));
-                if let Some(funcs) = funcs.resource_funcs.get(&resource) {
+                if let Some(funcs) = funcs.resource_funcs.get(&resource_id) {
                     for (_, src) in funcs {
                         self.src.ts(&src.ts);
                     }
@@ -913,12 +913,13 @@ impl Generator for Js {
                 addToImports(imports: any): void;
             ");
             self.src.js("addToImports(imports) {\n");
-            let any_async = iface.functions.iter().any(|f| f.is_async);
+            let any_async = iface.functions.iter().any(|(_, f)| f.is_async);
             if self.exported_resources.len() > 0 || any_async {
                 self.src
                     .js("if (!(\"canonical_abi\" in imports)) imports[\"canonical_abi\"] = {};\n");
             }
             for r in self.exported_resources.iter() {
+                let (resource_name, _) = iface.get_resource(*r);
                 self.src.js(&format!(
                     "
                         imports.canonical_abi['resource_drop_{name}'] = i => {{
@@ -936,9 +937,9 @@ impl Generator for Js {
                             return this._resource{idx}_slab.insert(new {class}(i, this));
                         }};
                     ",
-                    name = iface.resources[*r].name,
+                    name = resource_name,
                     idx = r.index(),
-                    class = iface.resources[*r].name.to_camel_case(),
+                    class = resource_name.to_camel_case(),
                 ));
             }
             if any_async {
@@ -1020,10 +1021,11 @@ impl Generator for Js {
             // created them after instantiation so we can pass the raw wasm
             // export as the destructor callback.
             for r in self.exported_resources.iter() {
+                let (name, _) = iface.get_resource(*r);
                 self.src.js(&format!(
                     "this._registry{} = new FinalizationRegistry(this._exports['canonical_abi_drop_{}']);\n",
                     r.index(),
-                    iface.resources[*r].name,
+                    name,
                 ));
             }
             self.src.js("}\n");
@@ -1036,6 +1038,7 @@ impl Generator for Js {
             self.src.js("}\n");
 
             for &ty in self.exported_resources.iter() {
+                let (name, _) = iface.get_resource(ty);
                 self.src.js(&format!(
                     "
                         export class {} {{
@@ -1064,8 +1067,8 @@ impl Generator for Js {
                                 dtor(wasm_val);
                             }}
                     ",
-                    iface.resources[ty].name.to_camel_case(),
-                    iface.resources[ty].name,
+                    name.to_camel_case(),
+                    name,
                     idx = ty.index(),
                 ));
                 self.src.ts(&format!(
@@ -1096,7 +1099,7 @@ impl Generator for Js {
                             // strong reference count.
                             drop(): void;
                     ",
-                    iface.resources[ty].name.to_camel_case(),
+                    name.to_camel_case(),
                 ));
 
                 if let Some(funcs) = exports.resource_funcs.get(&ty) {
@@ -1281,7 +1284,7 @@ impl Bindgen for FunctionBindgen<'_> {
     }
 
     fn return_pointer(&mut self, _iface: &Interface, _size: usize, _align: usize) -> String {
-        unimplemented!()
+        unimplemented!("JS return pointer not supported")
     }
 
     fn is_list_canonical(&self, iface: &Interface, ty: &Type) -> bool {
@@ -1438,6 +1441,7 @@ impl Bindgen for FunctionBindgen<'_> {
             // This means that they're interacting with a wrapper class defined
             // in JS.
             Instruction::I32FromBorrowedHandle { ty } => {
+                let (name, _) = iface.get_resource(*ty);
                 let tmp = self.tmp();
                 self.src
                     .js(&format!("const obj{} = {};\n", tmp, operands[0]));
@@ -1447,11 +1451,11 @@ impl Bindgen for FunctionBindgen<'_> {
                     self.src.js(&format!(
                         "if (!(obj{} instanceof {})) ",
                         tmp,
-                        iface.resources[*ty].name.to_camel_case()
+                        name.to_camel_case()
                     ));
                     self.src.js(&format!(
                         "throw new TypeError('expected instance of {}');\n",
-                        iface.resources[*ty].name.to_camel_case()
+                        name.to_camel_case()
                     ));
                 }
                 results.push(format!(

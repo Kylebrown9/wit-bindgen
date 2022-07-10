@@ -186,20 +186,16 @@ impl<'s, 'd, 'i> SourceBuilder<'s, 'd, 'i> {
             Type::Float32 | Type::Float64 => self.push_str("float"),
             Type::Char => self.push_str("str"),
             Type::String => self.push_str("str"),
-            Type::Handle(id) => {
-                if forward_ref {
-                    self.push_str("'");
-                }
-                let handle_name = &self.iface.resources[*id].name.to_camel_case();
-                self.source.push_str(handle_name);
-                if forward_ref {
-                    self.push_str("'");
-                }
-            }
             Type::Id(id) => {
                 let ty = &self.iface.types[*id];
                 if let Some(name) = &ty.name {
+                    if forward_ref {
+                        self.push_str("'");
+                    }
                     self.push_str(&name.to_camel_case());
+                    if forward_ref {
+                        self.push_str("'");
+                    }
                     return;
                 }
                 match &ty.kind {
@@ -227,6 +223,7 @@ impl<'s, 'd, 'i> SourceBuilder<'s, 'd, 'i> {
                         self.push_str("]");
                     }
                     TypeDefKind::List(t) => self.print_list(t),
+                    TypeDefKind::Resource(_) => unreachable!("Resources must always have names"),
                     TypeDefKind::Stream(s) => {
                         self.push_str("Stream[");
                         self.print_ty(&s.element, true);
@@ -428,23 +425,24 @@ mod tests {
         let mut deps = Dependencies::default();
         let mut iface = Interface::default();
         // Set up a Resource type to refer to
-        let resource_id = iface.resources.alloc(Resource {
+        let resource_id = iface.types.alloc(TypeDef {
             docs: Docs::default(),
-            name: "foo".into(),
-            foreign_module: None,
+            kind: TypeDefKind::Resource(Resource::default()),
+            name: Some("foo".to_string()),
+            foreign_module: None
         });
-        iface.resource_lookup.insert("foo".into(), resource_id);
-        let handle_ty = Type::Handle(resource_id);
+        iface.name_lookup.insert("foo".into(), Definition::Type(resource_id));
+        let resource_type = Type::Id(resource_id);
         // ForwardRef usage can be controlled by an argument to print_ty
         let mut s1 = Source::default();
         let mut builder = s1.builder(&mut deps, &iface);
-        builder.print_ty(&handle_ty, true);
+        builder.print_ty(&resource_type, true);
         drop(builder);
         assert_eq!(s1.s, "'Foo'");
 
         let mut s2 = Source::default();
         let mut builder = s2.builder(&mut deps, &iface);
-        builder.print_ty(&handle_ty, false);
+        builder.print_ty(&resource_type, false);
         drop(builder);
         assert_eq!(s2.s, "Foo");
 
@@ -452,7 +450,7 @@ mod tests {
         // Even if the outer type is itself not allowed to be one
         let option_id = iface.types.alloc(TypeDef {
             docs: Docs::default(),
-            kind: TypeDefKind::Option(handle_ty),
+            kind: TypeDefKind::Option(resource_type),
             name: None,
             foreign_module: None,
         });

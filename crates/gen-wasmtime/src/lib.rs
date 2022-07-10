@@ -29,7 +29,7 @@ pub struct Wasmtime {
     needs_custom_error_to_trap: bool,
     needs_custom_error_to_types: BTreeSet<String>,
     all_needed_handles: BTreeSet<String>,
-    exported_resources: BTreeSet<ResourceId>,
+    exported_resources: BTreeSet<TypeId>,
     types: Types,
     guest_imports: HashMap<String, Vec<Import>>,
     guest_exports: HashMap<String, Exports>,
@@ -476,8 +476,8 @@ impl Generator for Wasmtime {
         self.print_typedef_enum(id, name, enum_, docs);
     }
 
-    fn type_resource(&mut self, iface: &Interface, ty: ResourceId) {
-        let name = &iface.resources[ty].name;
+    fn type_resource(&mut self, iface: &Interface, ty: TypeId) {
+        let (name, _) = iface.get_resource(ty);
         self.all_needed_handles.insert(name.to_string());
 
         // If we're binding imports then all handles are associated types so
@@ -491,7 +491,7 @@ impl Generator for Wasmtime {
         // ... otherwise for exports we generate a newtype wrapper around an
         // `i32` to manage the resultt.
         let tyname = name.to_camel_case();
-        self.rustdoc(&iface.resources[ty].docs);
+        self.rustdoc(&iface.get_type_docs(ty));
         self.src.push_str("#[derive(Debug)]\n");
         self.src.push_str(&format!(
             "pub struct {}(wit_bindgen_wasmtime::rt::ResourceIndex);\n",
@@ -931,7 +931,7 @@ impl Generator for Wasmtime {
         }
 
         for (module, exports) in sorted_iter(&mem::take(&mut self.guest_exports)) {
-            let name = module.to_camel_case();
+            let module_name = module.to_camel_case();
 
             // Generate a struct that is the "state" of this exported module
             // which is required to be included in the host state `T` of the
@@ -947,7 +947,7 @@ impl Generator for Wasmtime {
             );
             self.push_str("#[derive(Default)]\n");
             self.push_str("pub struct ");
-            self.push_str(&name);
+            self.push_str(&module_name);
             self.push_str("Data {\n");
             for r in self.exported_resources.iter() {
                 self.src.push_str(&format!(
@@ -962,11 +962,11 @@ impl Generator for Wasmtime {
             self.push_str("}\n");
 
             self.push_str("pub struct ");
-            self.push_str(&name);
+            self.push_str(&module_name);
             self.push_str("<T> {\n");
             self.push_str(&format!(
                 "get_state: Box<dyn Fn(&mut T) -> &mut {}Data + Send + Sync>,\n",
-                name
+                module_name
             ));
             for (name, (ty, _)) in exports.fields.iter() {
                 self.push_str(name);
@@ -980,7 +980,7 @@ impl Generator for Wasmtime {
             } else {
                 ": Send"
             };
-            self.push_str(&format!("impl<T{}> {}<T> {{\n", bound, name));
+            self.push_str(&format!("impl<T{}> {}<T> {{\n", bound, module_name));
 
             if self.exported_resources.len() == 0 {
                 self.push_str("#[allow(unused_variables)]\n");
@@ -998,9 +998,10 @@ impl Generator for Wasmtime {
                         get_state: impl Fn(&mut T) -> &mut {}Data + Send + Sync + Copy + 'static,
                     ) -> anyhow::Result<()> {{
                 ",
-                name,
+                module_name,
             ));
             for r in self.exported_resources.iter() {
+                let (resource_name, _) = iface.get_resource(*r);
                 let (func_wrap, call, wait, prefix, suffix) = if self.opts.async_.is_none() {
                     ("func_wrap", "call", "", "", "")
                 } else {
@@ -1058,7 +1059,7 @@ impl Generator for Wasmtime {
                             }},
                         )?;
                     ",
-                    name = iface.resources[*r].name,
+                    name = resource_name,
                     idx = r.index(),
                     func_wrap = func_wrap,
                     call = call,
@@ -1102,7 +1103,7 @@ impl Generator for Wasmtime {
                         Ok((Self::new(store, &instance,get_state)?, instance))
                     }}
                 ",
-                async_fn, name, instantiate, wait,
+                async_fn, module_name, instantiate, wait,
             ));
 
             self.push_str(&format!(
@@ -1121,7 +1122,7 @@ impl Generator for Wasmtime {
                         get_state: impl Fn(&mut T) -> &mut {}Data + Send + Sync + Copy + 'static,
                     ) -> anyhow::Result<Self> {{
                 ",
-                name,
+                module_name,
             ));
             self.push_str("let mut store = store.as_context_mut();\n");
             assert!(!self.needs_get_func);
@@ -1133,6 +1134,7 @@ impl Generator for Wasmtime {
                 self.push_str(";\n");
             }
             for r in self.exported_resources.iter() {
+                let (name, _) = iface.get_resource(*r);
                 self.src.push_str(&format!(
                     "
                         get_state(store.data_mut()).dtor{} = \
@@ -1142,11 +1144,11 @@ impl Generator for Wasmtime {
                             )?);\n
                     ",
                     r.index(),
-                    iface.resources[*r].name,
+                    name,
                 ));
             }
             self.push_str("Ok(");
-            self.push_str(&name);
+            self.push_str(&module_name);
             self.push_str("{\n");
             for (name, _) in exports.fields.iter() {
                 self.push_str(name);
@@ -1161,6 +1163,7 @@ impl Generator for Wasmtime {
             }
 
             for r in self.exported_resources.iter() {
+                let (name, _) = iface.get_resource(*r);
                 let (async_fn, call, wait) = if self.opts.async_.is_none() {
                     ("", "call", "")
                 } else {
@@ -1190,8 +1193,8 @@ impl Generator for Wasmtime {
                             Ok(())
                         }}
                     ",
-                    name_snake = iface.resources[*r].name.to_snake_case(),
-                    name_camel = iface.resources[*r].name.to_camel_case(),
+                    name_snake = name.to_snake_case(),
+                    name_camel = name.to_camel_case(),
                     idx = r.index(),
                     async = async_fn,
                     call = call,
@@ -1419,7 +1422,7 @@ impl Bindgen for FunctionBindgen<'_> {
     }
 
     fn return_pointer(&mut self, _iface: &Interface, _size: usize, _align: usize) -> String {
-        unimplemented!()
+        unimplemented!("Wasmtime return pointer not supported")
     }
 
     fn is_list_canonical(&self, iface: &Interface, ty: &Type) -> bool {
@@ -1530,7 +1533,7 @@ impl Bindgen for FunctionBindgen<'_> {
             }
 
             Instruction::I32FromOwnedHandle { ty } => {
-                let name = &iface.resources[*ty].name;
+                let (name, _) = iface.get_resource(*ty);
                 results.push(format!(
                     "_tables.{}_table.insert({}) as i32",
                     name.to_snake_case(),
@@ -1538,7 +1541,7 @@ impl Bindgen for FunctionBindgen<'_> {
                 ));
             }
             Instruction::HandleBorrowedFromI32 { ty } => {
-                let name = &iface.resources[*ty].name;
+                let (name, _) = iface.get_resource(*ty);
                 results.push(format!(
                     "_tables.{}_table.get(({}) as u32).ok_or_else(|| {{
                             wasmtime::Trap::new(\"invalid handle index\")
@@ -1571,7 +1574,8 @@ impl Bindgen for FunctionBindgen<'_> {
                     operands[0],
                 ));
 
-                let name = iface.resources[*ty].name.to_camel_case();
+                let (name, _) = iface.get_resource(*ty);
+                let name = name.to_camel_case();
                 results.push(format!("{}(handle{})", name, tmp));
             }
 
@@ -2048,8 +2052,8 @@ impl Bindgen for FunctionBindgen<'_> {
                 self.caller_memory_available = false; // invalidated by call
             }
 
-            Instruction::CallWasmAsyncImport { .. } => unimplemented!(),
-            Instruction::CallWasmAsyncExport { .. } => unimplemented!(),
+            Instruction::CallWasmAsyncImport { .. } => unimplemented!("Call WASM Async Import"),
+            Instruction::CallWasmAsyncExport { .. } => unimplemented!("Call WASM Async Export"),
 
             Instruction::CallInterface { module: _, func } => {
                 for (i, operand) in operands.iter().enumerate() {
@@ -2141,8 +2145,8 @@ impl Bindgen for FunctionBindgen<'_> {
                 }
             }
 
-            Instruction::ReturnAsyncExport { .. } => unimplemented!(),
-            Instruction::ReturnAsyncImport { .. } => unimplemented!(),
+            Instruction::ReturnAsyncExport { .. } => unimplemented!("Return Async Export"),
+            Instruction::ReturnAsyncImport { .. } => unimplemented!("Return Async Import"),
 
             Instruction::I32Load { offset } => results.push(self.load(*offset, "i32", operands)),
             Instruction::I32Load8U { offset } => {
@@ -2190,7 +2194,7 @@ impl Bindgen for FunctionBindgen<'_> {
                 results.push(ptr);
             }
 
-            Instruction::Free { .. } => unimplemented!(),
+            Instruction::Free { .. } => unimplemented!("Gen Wasmtime Free"),
         }
     }
 }

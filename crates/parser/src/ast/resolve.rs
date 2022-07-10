@@ -1,20 +1,16 @@
 use super::{Error, Item, Span, Value, ValueKind};
 use crate::*;
 use anyhow::Result;
-use std::collections::{HashMap, HashSet};
-use std::mem;
+use std::collections::{hash_map::Entry, HashMap, HashSet};
 
 #[derive(Default)]
 pub struct Resolver {
-    type_lookup: HashMap<String, TypeId>,
+    name_lookup: HashMap<String, Definition>,
     types: Arena<TypeDef>,
-    resource_lookup: HashMap<String, ResourceId>,
-    resources_copied: HashMap<(String, ResourceId), ResourceId>,
     types_copied: HashMap<(String, TypeId), TypeId>,
-    resources: Arena<Resource>,
     anon_types: HashMap<Key, TypeId>,
-    functions: Vec<Function>,
-    globals: Vec<Global>,
+    functions: Arena<Function>,
+    globals: Arena<Global>,
 }
 
 #[derive(PartialEq, Eq, Hash)]
@@ -33,7 +29,7 @@ enum Key {
 
 impl Resolver {
     pub(super) fn resolve(
-        &mut self,
+        mut self,
         name: &str,
         fields: &[Item<'_>],
         deps: &HashMap<String, Interface>,
@@ -50,9 +46,12 @@ impl Resolver {
                 Item::TypeDef(t) => t,
                 _ => continue,
             };
-            let id = self.type_lookup[&*t.name.name];
-            let kind = self.resolve_type_def(&t.ty)?;
-            self.types.get_mut(id).unwrap().kind = kind;
+            if let Definition::Type(id) = self.name_lookup[&*t.name.name] {
+                let kind = self.resolve_type_def(&t.ty)?;
+                self.types.get_mut(id).unwrap().kind = kind;
+            } else {
+                unreachable!();
+            }
         }
 
         // And finally we can resolve all type references in functions/globals
@@ -64,12 +63,16 @@ impl Resolver {
                 Item::Value(v) => self.resolve_value(v)?,
                 Item::Resource(r) => self.resolve_resource(r)?,
                 Item::TypeDef(t) => {
-                    self.validate_type_not_recursive(
-                        t.name.span,
-                        self.type_lookup[&*t.name.name],
-                        &mut visiting,
-                        &mut valid_types,
-                    )?;
+                    if let Definition::Type(ty) = self.name_lookup[&*t.name.name] {
+                        self.validate_type_not_recursive(
+                            t.name.span,
+                            ty,
+                            &mut visiting,
+                            &mut valid_types,
+                        )?;
+                    } else {
+                        unreachable!();
+                    }
                 }
                 _ => continue,
             }
@@ -78,14 +81,12 @@ impl Resolver {
         Ok(Interface {
             name: name.to_string(),
             module: None,
-            types: mem::take(&mut self.types),
-            type_lookup: mem::take(&mut self.type_lookup),
-            resources: mem::take(&mut self.resources),
-            resource_lookup: mem::take(&mut self.resource_lookup),
+            name_lookup: self.name_lookup,
+            types: self.types,
+            functions: self.functions,
+            globals: self.globals,
             interface_lookup: Default::default(),
             interfaces: Default::default(),
-            functions: mem::take(&mut self.functions),
-            globals: mem::take(&mut self.globals),
         })
     }
 
@@ -124,64 +125,41 @@ impl Resolver {
                             Some(id) => (&id.name, id.span),
                             None => (&name.name.name, name.name.span),
                         };
-                        let mut found = false;
 
-                        if let Some(id) = dep.resource_lookup.get(&*name.name.name) {
-                            let resource = self.copy_resource(&mod_name.name, dep, *id);
-                            self.define_resource(my_name, span, resource)?;
-                            found = true;
-                        }
-
-                        if let Some(id) = dep.type_lookup.get(&*name.name.name) {
-                            let ty = self.copy_type_def(&mod_name.name, dep, *id);
-                            self.define_type(my_name, span, ty)?;
-                            found = true;
-                        }
-
-                        if !found {
-                            return Err(Error {
-                                span: name.name.span,
-                                msg: "name not defined in submodule".to_string(),
+                        match dep.name_lookup.get(&*name.name.name) {
+                            Some(Definition::Type(id)) => {
+                                let ty = self.copy_type_def(&mod_name.name, dep, *id);
+                                self.define_type(my_name, span, ty)?;
+                            },
+                            Some(Definition::Function(_)) => { todo!() },
+                            Some(Definition::Global(_)) => { todo!() },
+                            None => {
+                                return Err(Error {
+                                    span: name.name.span,
+                                    msg: "name not defined in submodule".to_string(),
+                                }
+                                .into());
                             }
-                            .into());
                         }
                     }
                 }
                 None => {
-                    for (id, resource) in dep.resources.iter() {
-                        let id = self.copy_resource(&mod_name.name, dep, id);
-                        self.define_resource(&resource.name, mod_name.span, id)?;
-                    }
-                    let mut names = dep.type_lookup.iter().collect::<Vec<_>>();
+                    let mut names = dep.name_lookup.keys().collect::<Vec<_>>();
                     names.sort(); // produce a stable order by which to add names
-                    for (name, id) in names {
-                        let ty = self.copy_type_def(&mod_name.name, dep, *id);
-                        self.define_type(name, mod_name.span, ty)?;
+                    for name in names {
+                        let definition = &dep.name_lookup[name];
+                        match definition {
+                            Definition::Type(id) => {
+                                let ty = self.copy_type_def(&mod_name.name, dep, *id);
+                                self.define_type(name, mod_name.span, ty)?;
+                            },
+                            _ => continue
+                        }
                     }
                 }
             }
         }
         Ok(())
-    }
-
-    fn copy_resource(&mut self, dep_name: &str, dep: &Interface, r: ResourceId) -> ResourceId {
-        let resources = &mut self.resources;
-        *self
-            .resources_copied
-            .entry((dep_name.to_string(), r))
-            .or_insert_with(|| {
-                let r = &dep.resources[r];
-                let resource = Resource {
-                    docs: r.docs.clone(),
-                    name: r.name.clone(),
-                    foreign_module: Some(
-                        r.foreign_module
-                            .clone()
-                            .unwrap_or_else(|| dep_name.to_string()),
-                    ),
-                };
-                resources.alloc(resource)
-            })
     }
 
     fn copy_type_def(&mut self, dep_name: &str, dep: &Interface, dep_id: TypeId) -> TypeId {
@@ -253,6 +231,22 @@ impl Resolver {
                     element: self.copy_type(dep_name, dep, e.element),
                     end: self.copy_type(dep_name, dep, e.end),
                 }),
+                TypeDefKind::Resource(r) => {
+                    let mut new_funcs = HashMap::default();
+                    for (f_name, f_id) in r.functions.iter() {
+                        let dep_func = &dep.functions[*f_id];
+                        let new_id = self.functions.alloc(Function {
+                            is_async: dep_func.is_async,
+                            docs: dep_func.docs.clone(),
+                            name: dep_func.name.clone(),
+                            kind: dep_func.kind.clone(),
+                            params: dep_func.params.clone(),
+                            result: dep_func.result
+                        });
+                        new_funcs.insert(f_name.clone(), new_id);
+                    }
+                    TypeDefKind::Resource(Resource { functions: new_funcs })
+                },
             },
         };
         let id = self.types.alloc(ty);
@@ -263,120 +257,73 @@ impl Resolver {
     fn copy_type(&mut self, dep_name: &str, dep: &Interface, ty: Type) -> Type {
         match ty {
             Type::Id(id) => Type::Id(self.copy_type_def(dep_name, dep, id)),
-            Type::Handle(id) => Type::Handle(self.copy_resource(dep_name, dep, id)),
             other => other,
         }
     }
 
     fn register_names(&mut self, fields: &[Item<'_>]) -> Result<()> {
-        // TODO: add span info and generate error message pointing
-        // original definition in case of duplicates.
-        #[derive(Debug, Clone)]
-        enum Definition {
-            Resource,
-            Function,
-            Global,
-            Type,
-        }
-
-        let mut values = HashMap::new();
+        let mut values = HashSet::new();
         for field in fields {
             match field {
                 Item::Resource(r) => {
                     let docs = self.docs(&r.docs);
-                    let id = self.resources.alloc(Resource {
+                    let id = self.types.alloc(TypeDef {
                         docs,
-                        name: r.name.name.to_string(),
+                        name: Some(r.name.name.to_string()),
+                        kind: TypeDefKind::Resource(Resource::default()),
                         foreign_module: None,
                     });
-                    self.define_resource(&r.name.name, r.name.span, id)?;
-                    let type_id = self.types.alloc(TypeDef {
-                        docs: Docs::default(),
-                        kind: TypeDefKind::Type(Type::Handle(id)),
-                        name: None,
-                        foreign_module: None,
-                    });
-                    self.define_type(&r.name.name, r.name.span, type_id)?;
-                    if let Some(existing) = values.insert(&r.name.name, Definition::Resource) {
-                        return Err(Error {
-                            span: r.name.span,
-                            msg: format!(
-                                "Resource {:?} already defined as a {:?}",
-                                r.name.name, existing
-                            ),
-                        }
-                        .into());
-                    }
+                    self.define_type(&r.name.name, r.name.span, id)?;
                 }
                 Item::TypeDef(t) => {
                     let docs = self.docs(&t.docs);
                     let id = self.types.alloc(TypeDef {
                         docs,
+                        name: Some(t.name.name.to_string()),
                         // a dummy kind is used for now which will get filled in
                         // later with the actual desired contents.
                         kind: TypeDefKind::List(Type::U8),
-                        name: Some(t.name.name.to_string()),
                         foreign_module: None,
                     });
                     self.define_type(&t.name.name, t.name.span, id)?;
-                    if let Some(existing) = values.insert(&t.name.name, Definition::Type) {
-                        return Err(Error {
-                            span: t.name.span,
-                            msg: format!(
-                                "Type {:?} already defined as a {:?}",
-                                t.name.name, existing
-                            ),
-                        }
-                        .into());
-                    }
                 }
                 Item::Value(f) => {
-                    let kind = match &f.kind {
-                        ValueKind::Function { .. } => Definition::Function,
-                        ValueKind::Global { .. } => Definition::Global,
-                    };
-                    if let Some(existing) = values.insert(&f.name.name, kind.clone()) {
+                    if !values.insert(&f.name.name) { //TODO-Kyle
                         return Err(Error {
                             span: f.name.span,
-                            msg: format!(
-                                "{:?} {:?} already defined as a {:?}",
-                                kind, f.name.name, existing
-                            ),
+                            msg: format!("{:?} defined twice", f.name.name),
                         }
                         .into());
                     }
                 }
                 Item::Use(_) => {}
 
-                Item::Interface(_) => unimplemented!(),
+                Item::Interface(_) => unimplemented!("Interface resolution not supported"),
             }
         }
 
         Ok(())
     }
 
-    fn define_resource(&mut self, name: &str, span: Span, id: ResourceId) -> Result<()> {
-        if self.resource_lookup.insert(name.to_string(), id).is_some() {
-            Err(Error {
-                span,
-                msg: format!("resource {:?} defined twice", name),
+    fn define_type(&mut self, name: &str, span: Span, id: TypeId) -> Result<()> {
+        match self.name_lookup.entry(name.to_string()) {
+            Entry::Occupied(entry) => {
+                let prior_def = entry.get().describe();
+                let msg = format!(
+                    "type {:?} previously defined as a {}",
+                    name, prior_def
+                );
+                Err(Error { span, msg }.into())
             }
-            .into())
-        } else {
-            Ok(())
+            Entry::Vacant(entry) => {
+                entry.insert(Definition::Type(id));
+                Ok(())
+            }
         }
     }
 
-    fn define_type(&mut self, name: &str, span: Span, id: TypeId) -> Result<()> {
-        if self.type_lookup.insert(name.to_string(), id).is_some() {
-            Err(Error {
-                span,
-                msg: format!("type {:?} defined twice", name),
-            }
-            .into())
-        } else {
-            Ok(())
-        }
+    fn define_function(&mut self, name: &str, span: Span, ) {
+        // TODO-Kyle
     }
 
     fn resolve_type_def(&mut self, ty: &super::Type<'_>) -> Result<TypeDefKind> {
@@ -395,22 +342,16 @@ impl Resolver {
             super::Type::Float64 => TypeDefKind::Type(Type::Float64),
             super::Type::Char => TypeDefKind::Type(Type::Char),
             super::Type::String => TypeDefKind::Type(Type::String),
-            super::Type::Handle(resource) => {
-                let id = match self.resource_lookup.get(&*resource.name) {
-                    Some(id) => *id,
-                    None => {
+            super::Type::Name(name) => {
+                let id = match self.name_lookup.get(&*name.name) {
+                    Some(Definition::Type(id)) => *id,
+                    Some(_) => {
                         return Err(Error {
-                            span: resource.span,
-                            msg: format!("no resource named `{}`", resource.name),
+                            span: name.span,
+                            msg: format!("name `{}` does not refer to type", name.name),
                         }
                         .into())
                     }
-                };
-                TypeDefKind::Type(Type::Handle(id))
-            }
-            super::Type::Name(name) => {
-                let id = match self.type_lookup.get(&*name.name) {
-                    Some(id) => *id,
                     None => {
                         return Err(Error {
                             span: name.span,
@@ -570,6 +511,7 @@ impl Resolver {
             TypeDefKind::Expected(e) => Key::Expected(e.ok, e.err),
             TypeDefKind::Union(u) => Key::Union(u.cases.iter().map(|c| c.ty).collect()),
             TypeDefKind::Stream(s) => Key::Stream(s.element, s.end),
+            TypeDefKind::Resource(_) => todo!(),
         };
         let types = &mut self.types;
         let id = self
@@ -612,7 +554,7 @@ impl Resolver {
                     .map(|(name, ty)| Ok((name.name.to_string(), self.resolve_type(ty)?)))
                     .collect::<Result<_>>()?;
                 let result = self.resolve_type(result)?;
-                self.functions.push(Function {
+                self.functions.alloc(Function {
                     docs,
                     name: value.name.name.to_string(),
                     kind: FunctionKind::Freestanding,
@@ -623,7 +565,7 @@ impl Resolver {
             }
             ValueKind::Global(ty) => {
                 let ty = self.resolve_type(ty)?;
-                self.globals.push(Global {
+                self.globals.alloc(Global {
                     docs,
                     name: value.name.name.to_string(),
                     ty,
@@ -634,8 +576,11 @@ impl Resolver {
     }
 
     fn resolve_resource(&mut self, resource: &super::Resource<'_>) -> Result<()> {
-        let mut names = HashSet::new();
-        let id = self.resource_lookup[&*resource.name.name];
+        let mut functions = HashMap::new();
+        let id = match self.name_lookup[&*resource.name.name] {
+            Definition::Type(id) => id,
+            _ => unreachable!()
+        };
         for (statik, value) in resource.values.iter() {
             let (is_async, params, result) = match &value.kind {
                 ValueKind::Function {
@@ -651,13 +596,6 @@ impl Resolver {
                     .into());
                 }
             };
-            if !names.insert(&value.name.name) {
-                return Err(Error {
-                    span: value.name.span,
-                    msg: format!("{:?} defined twice in this resource", value.name.name),
-                }
-                .into());
-            }
             let docs = self.docs(&value.docs);
             let mut params = params
                 .iter()
@@ -670,13 +608,13 @@ impl Resolver {
                     name: value.name.name.to_string(),
                 }
             } else {
-                params.insert(0, ("self".to_string(), Type::Handle(id)));
+                params.insert(0, ("self".to_string(), Type::Id(id)));
                 FunctionKind::Method {
                     resource: id,
                     name: value.name.name.to_string(),
                 }
             };
-            self.functions.push(Function {
+            let func_id = self.functions.alloc(Function {
                 is_async,
                 docs,
                 name: format!("{}::{}", resource.name.name, value.name.name),
@@ -684,7 +622,23 @@ impl Resolver {
                 params,
                 result,
             });
+            let func_entry = functions.entry(value.name.name.to_string());
+            match func_entry {
+                Entry::Occupied(_) => {
+                    return Err(Error {
+                        span: value.name.span,
+                        msg: format!("{:?} defined twice in this resource", value.name.name),
+                    }
+                    .into());
+                },
+                Entry::Vacant(entry) => entry.insert(func_id),
+            };
         }
+        let resource_entry = match &mut self.types[id].kind {
+            TypeDefKind::Resource(r) => r,
+            _ => unreachable!()
+        };
+        resource_entry.functions = functions;
         Ok(())
     }
 
@@ -761,7 +715,8 @@ impl Resolver {
                 }
             }
 
-            TypeDefKind::Flags(_)
+            TypeDefKind::Resource(_)
+            | TypeDefKind::Flags(_)
             | TypeDefKind::List(_)
             | TypeDefKind::Type(_)
             | TypeDefKind::Enum(_) => {}

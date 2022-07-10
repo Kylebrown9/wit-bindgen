@@ -178,10 +178,10 @@ fn validate_imported_interface(
     types: &Types,
 ) -> Result<()> {
     for (func_name, ty) in imports {
-        let f = interface
+        let (_, f) = interface
             .functions
             .iter()
-            .find(|f| f.name == *func_name)
+            .find(|(_, f)| f.name == *func_name)
             .ok_or_else(|| {
                 anyhow!(
                     "import interface `{}` is missing function `{}` that is required by the module",
@@ -214,7 +214,7 @@ fn validate_exported_interface(
     exports: &IndexMap<&str, u32>,
     types: &Types,
 ) -> Result<()> {
-    for f in &interface.functions {
+    for (_, f) in &interface.functions {
         let expected_export = expected_export_name(name, &f.name);
         match exports.get(expected_export.as_ref()) {
             Some(func_index) => {

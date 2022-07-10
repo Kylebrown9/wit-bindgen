@@ -169,8 +169,6 @@ fn to_json(i: &Interface) -> String {
     #[derive(Serialize)]
     struct Interface {
         #[serde(skip_serializing_if = "Vec::is_empty")]
-        resources: Vec<Resource>,
-        #[serde(skip_serializing_if = "Vec::is_empty")]
         types: Vec<TypeDef>,
         #[serde(skip_serializing_if = "Vec::is_empty")]
         functions: Vec<Function>,
@@ -207,6 +205,7 @@ fn to_json(i: &Interface) -> String {
         Tuple { types: Vec<String> },
         Option(String),
         Expected { ok: String, err: String },
+        Resource { functions: Vec<String> },
         Stream { element: String, end: String },
         List(String),
         Union { cases: Vec<String> },
@@ -227,15 +226,6 @@ fn to_json(i: &Interface) -> String {
         ty: String,
     }
 
-    let resources = i
-        .resources
-        .iter()
-        .map(|(_, r)| Resource {
-            name: r.name.clone(),
-            foreign_module: r.foreign_module.clone(),
-        })
-        .collect::<Vec<_>>();
-
     let types = i
         .types
         .iter()
@@ -249,7 +239,7 @@ fn to_json(i: &Interface) -> String {
     let functions = i
         .functions
         .iter()
-        .map(|f| Function {
+        .map(|(_, f)| Function {
             name: f.name.clone(),
             is_async: if f.is_async { Some(f.is_async) } else { None },
             params: f.params.iter().map(|(_, ty)| translate_type(ty)).collect(),
@@ -259,14 +249,13 @@ fn to_json(i: &Interface) -> String {
     let globals = i
         .globals
         .iter()
-        .map(|g| Global {
+        .map(|(_, g)| Global {
             name: g.name.clone(),
             ty: translate_type(&g.ty),
         })
         .collect::<Vec<_>>();
 
     let iface = Interface {
-        resources,
         types,
         functions,
         globals,
@@ -304,6 +293,10 @@ fn to_json(i: &Interface) -> String {
                 ok: translate_type(&e.ok),
                 err: translate_type(&e.err),
             },
+            TypeDefKind::Resource(r) => {
+                let functions: Vec<_> = r.functions.iter().map(|(name, _)| name.to_string()).collect();
+                Type::Resource { functions }
+            }
             TypeDefKind::Stream(s) => Type::Stream {
                 element: translate_type(&s.element),
                 end: translate_type(&s.end),
@@ -332,7 +325,6 @@ fn to_json(i: &Interface) -> String {
             Type::Float64 => format!("float64"),
             Type::Char => format!("char"),
             Type::String => format!("string"),
-            Type::Handle(resource) => format!("handle-{}", resource.index()),
             Type::Id(id) => format!("type-{}", id.index()),
         }
     }

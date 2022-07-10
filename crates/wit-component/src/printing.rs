@@ -15,13 +15,13 @@ pub struct InterfacePrinter {
 impl InterfacePrinter {
     /// Print the given WebAssembly interface to a string.
     pub fn print(&mut self, interface: &Interface) -> Result<String> {
-        for func in &interface.functions {
+        for (_, func) in &interface.functions {
             for ty in func.params.iter().map(|p| &p.1).chain([&func.result]) {
                 self.declare_type(interface, ty)?;
             }
         }
 
-        for func in &interface.functions {
+        for (_, func) in &interface.functions {
             write!(&mut self.output, "{}: func(", func.name)?;
             for (i, (name, ty)) in func.params.iter().enumerate() {
                 if i > 0 {
@@ -101,13 +101,12 @@ impl InterfacePrinter {
                         self.output.push('>');
                     }
                     TypeDefKind::Type(ty) => self.print_type_name(interface, ty)?,
+                    TypeDefKind::Resource(_) => bail!("interface has unsupported type"),
                     TypeDefKind::Stream(_) => {
                         todo!("interface has an unnamed stream type")
                     }
                 }
             }
-
-            Type::Handle(_) => bail!("interface has unsupported type"),
         }
 
         Ok(())
@@ -197,11 +196,10 @@ impl InterfacePrinter {
                         }
                         None => bail!("unnamed type in interface"),
                     },
+                    TypeDefKind::Resource(_) => bail!("interface has unsupported type"),
                     TypeDefKind::Stream(_) => todo!("declare stream"),
                 }
             }
-
-            Type::Handle(_) => bail!("interface has unsupported type"),
         }
         Ok(())
     }

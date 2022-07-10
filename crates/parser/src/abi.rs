@@ -1,6 +1,6 @@
 use crate::sizealign::align_to;
 use crate::{
-    Enum, Expected, Flags, FlagsRepr, Function, Int, Interface, Record, ResourceId, Tuple, Type,
+    Enum, Expected, Flags, FlagsRepr, Function, Int, Interface, Record, Tuple, Type,
     TypeDefKind, TypeId, Union, Variant,
 };
 use std::mem;
@@ -301,7 +301,7 @@ def_instruction! {
         ///
         /// This instruction is not used for return values in either
         /// export/import positions.
-        I32FromBorrowedHandle { ty: ResourceId } : [1] => [1],
+        I32FromBorrowedHandle { ty: TypeId } : [1] => [1],
 
         /// Converts an "owned" handle into a wasm `i32` value.
         ///
@@ -340,7 +340,7 @@ def_instruction! {
         /// Basically this instruction is used for handle->wasm conversions
         /// depending on the calling context and where the handle type in
         /// question was defined.
-        I32FromOwnedHandle { ty: ResourceId } : [1] => [1],
+        I32FromOwnedHandle { ty: TypeId } : [1] => [1],
 
         /// Converts a native wasm `i32` into an owned handle value.
         ///
@@ -363,7 +363,7 @@ def_instruction! {
         /// Note that like `I32FromOwnedHandle` the first and third bullets
         /// above don't happen today because witx can't express type imports
         /// just yet.
-        HandleOwnedFromI32 { ty: ResourceId } : [1] => [1],
+        HandleOwnedFromI32 { ty: TypeId } : [1] => [1],
 
         /// Converts a native wasm `i32` into a borrowedhandle value.
         ///
@@ -378,7 +378,7 @@ def_instruction! {
         ///   is defined by the wasm module.
         /// * An host-defined imported function is receiving a handle, as a
         ///   parameter, that is defined by the host itself.
-        HandleBorrowedFromI32 { ty: ResourceId } : [1] => [1],
+        HandleBorrowedFromI32 { ty: TypeId } : [1] => [1],
 
         // lists
 
@@ -967,8 +967,7 @@ impl Interface {
             | Type::U16
             | Type::S32
             | Type::U32
-            | Type::Char
-            | Type::Handle(_) => result.push(WasmType::I32),
+            | Type::Char => result.push(WasmType::I32),
 
             Type::U64 | Type::S64 => result.push(WasmType::I64),
             Type::Float32 => result.push(WasmType::F32),
@@ -1024,6 +1023,10 @@ impl Interface {
                 TypeDefKind::Union(u) => {
                     result.push(WasmType::I32);
                     self.push_wasm_variants(variant, u.cases.iter().map(|c| &c.ty), result);
+                }
+
+                TypeDefKind::Resource(_) => {
+                    result.push(WasmType::I32);
                 }
 
                 TypeDefKind::Stream(_) => {
@@ -1458,44 +1461,10 @@ impl<'a, B: Bindgen> Generator<'a, B> {
             Type::Char => self.emit(&I32FromChar),
             Type::Float32 => self.emit(&F32FromFloat32),
             Type::Float64 => self.emit(&F64FromFloat64),
-            Type::Handle(ty) => {
-                let borrowed = match self.lift_lower {
-                    // This means that a return value is being lowered, which is
-                    // never borrowed.
-                    LiftLower::LiftArgsLowerResults => false,
-                    // There's one of three possible situations we're in:
-                    //
-                    // * The handle is defined by the wasm module itself. This
-                    //   is the only actual possible scenario today due to how
-                    //   witx is defined. In this situation the handle is owned
-                    //   by the host and "proof of ownership" is being offered
-                    //   and there's no need to relinquish ownership.
-                    //
-                    // * The handle is defined by the host, and it's passing it
-                    //   to a wasm module. This should use an owned conversion.
-                    //   This isn't expressible in today's `*.witx` format.
-                    //
-                    // * The handle is defined by neither the host or the wasm
-                    //   mdoule. This means that the host is passing a
-                    //   capability from another wasm module into this one,
-                    //   meaning it's doing so by reference since the host is
-                    //   retaining access to its own
-                    //
-                    // Note, again, only the first bullet here is possible
-                    // today, hence the hardcoded `true` value. We'll need to
-                    // refactor `witx` to expose the other possibilities.
-                    LiftLower::LowerArgsLiftResults => true,
-                };
-                if borrowed {
-                    self.emit(&I32FromBorrowedHandle { ty });
-                } else {
-                    self.emit(&I32FromOwnedHandle { ty });
-                }
-            }
             Type::String => {
                 let realloc = self.list_realloc();
                 self.emit(&StringLower { realloc });
-            }
+            },
             Type::Id(id) => match &self.iface.types[id].kind {
                 TypeDefKind::Type(t) => self.lower(t),
                 TypeDefKind::List(element) => {
@@ -1588,6 +1557,42 @@ impl<'a, B: Bindgen> Generator<'a, B> {
                         name: self.iface.types[id].name.as_deref().unwrap(),
                     });
                 }
+
+                TypeDefKind::Resource(_) => {
+                    let borrowed = match self.lift_lower {
+                        // This means that a return value is being lowered, which is
+                        // never borrowed.
+                        LiftLower::LiftArgsLowerResults => false,
+                        // There's one of three possible situations we're in:
+                        //
+                        // * The handle is defined by the wasm module itself. This
+                        //   is the only actual possible scenario today due to how
+                        //   witx is defined. In this situation the handle is owned
+                        //   by the host and "proof of ownership" is being offered
+                        //   and there's no need to relinquish ownership.
+                        //
+                        // * The handle is defined by the host, and it's passing it
+                        //   to a wasm module. This should use an owned conversion.
+                        //   This isn't expressible in today's `*.witx` format.
+                        //
+                        // * The handle is defined by neither the host or the wasm
+                        //   mdoule. This means that the host is passing a
+                        //   capability from another wasm module into this one,
+                        //   meaning it's doing so by reference since the host is
+                        //   retaining access to its own
+                        //
+                        // Note, again, only the first bullet here is possible
+                        // today, hence the hardcoded `true` value. We'll need to
+                        // refactor `witx` to expose the other possibilities.
+                        LiftLower::LowerArgsLiftResults => true,
+                    };
+                    if borrowed {
+                        self.emit(&I32FromBorrowedHandle { ty: id });
+                    } else {
+                        self.emit(&I32FromOwnedHandle { ty: id });
+                    }
+                }
+
                 TypeDefKind::Stream(_) => todo!("lower stream"),
             },
         }
@@ -1675,19 +1680,6 @@ impl<'a, B: Bindgen> Generator<'a, B> {
             Type::Char => self.emit(&CharFromI32),
             Type::Float32 => self.emit(&Float32FromF32),
             Type::Float64 => self.emit(&Float64FromF64),
-            Type::Handle(ty) => {
-                // For more information on these values see the comments in
-                // `lower` above.
-                let borrowed = match self.lift_lower {
-                    LiftLower::LiftArgsLowerResults => true,
-                    LiftLower::LowerArgsLiftResults => false,
-                };
-                if borrowed {
-                    self.emit(&HandleBorrowedFromI32 { ty });
-                } else {
-                    self.emit(&HandleOwnedFromI32 { ty });
-                }
-            }
             Type::String => {
                 let free = self.list_free();
                 self.emit(&StringLift { free });
@@ -1797,6 +1789,20 @@ impl<'a, B: Bindgen> Generator<'a, B> {
                     });
                 }
 
+                TypeDefKind::Resource(_) => {
+                    // For more information on these values see the comments in
+                    // `lower` above.
+                    let borrowed = match self.lift_lower {
+                        LiftLower::LiftArgsLowerResults => true,
+                        LiftLower::LowerArgsLiftResults => false,
+                    };
+                    if borrowed {
+                        self.emit(&HandleBorrowedFromI32 { ty: id });
+                    } else {
+                        self.emit(&HandleOwnedFromI32 { ty: id });
+                    }
+                }
+
                 TypeDefKind::Stream(_) => todo!("lift stream"),
             },
         }
@@ -1857,7 +1863,7 @@ impl<'a, B: Bindgen> Generator<'a, B> {
                 self.lower_and_emit(ty, addr, &I32Store8 { offset })
             }
             Type::U16 | Type::S16 => self.lower_and_emit(ty, addr, &I32Store16 { offset }),
-            Type::U32 | Type::S32 | Type::Handle(_) | Type::Char => {
+            Type::U32 | Type::S32 | Type::Char => {
                 self.lower_and_emit(ty, addr, &I32Store { offset })
             }
             Type::U64 | Type::S64 => self.lower_and_emit(ty, addr, &I64Store { offset }),
@@ -1968,6 +1974,10 @@ impl<'a, B: Bindgen> Generator<'a, B> {
                     });
                 }
 
+                TypeDefKind::Resource(_) => {
+                    self.lower_and_emit(ty, addr, &I32Store { offset });
+                },
+
                 TypeDefKind::Stream(_) => todo!("write stream to memory"),
             },
         }
@@ -2040,7 +2050,7 @@ impl<'a, B: Bindgen> Generator<'a, B> {
             Type::S8 => self.emit_and_lift(ty, addr, &I32Load8S { offset }),
             Type::U16 => self.emit_and_lift(ty, addr, &I32Load16U { offset }),
             Type::S16 => self.emit_and_lift(ty, addr, &I32Load16S { offset }),
-            Type::U32 | Type::S32 | Type::Char | Type::Handle(_) => {
+            Type::U32 | Type::S32 | Type::Char => {
                 self.emit_and_lift(ty, addr, &I32Load { offset })
             }
             Type::U64 | Type::S64 => self.emit_and_lift(ty, addr, &I64Load { offset }),
@@ -2145,6 +2155,10 @@ impl<'a, B: Bindgen> Generator<'a, B> {
                         name: self.iface.types[id].name.as_deref().unwrap(),
                     });
                 }
+
+                TypeDefKind::Resource(_) => {
+                    self.emit_and_lift(ty, addr, &I32Load { offset })
+                },
 
                 TypeDefKind::Stream(_) => todo!("read stream from memory"),
             },

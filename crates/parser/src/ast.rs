@@ -87,7 +87,6 @@ enum Type<'a> {
     Float64,
     Char,
     String,
-    Handle(Id<'a>),
     Name(Id<'a>),
     List(Box<Type<'a>>),
     Record(Record<'a>),
@@ -199,7 +198,7 @@ impl<'a> Ast<'a> {
         name: &str,
         map: &HashMap<String, crate::Interface>,
     ) -> Result<crate::Interface> {
-        let mut resolver = resolve::Resolver::default();
+        let resolver = resolve::Resolver::default();
         let instance = resolver.resolve(name, &self.items, map)?;
         Ok(instance)
     }
@@ -474,10 +473,6 @@ impl<'a> Type<'a> {
             Some((_span, Token::Float32)) => Ok(Type::Float32),
             Some((_span, Token::Float64)) => Ok(Type::Float64),
             Some((_span, Token::Char)) => Ok(Type::Char),
-            Some((_span, Token::Handle)) => {
-                let name = parse_id(tokens)?;
-                Ok(Type::Handle(name))
-            }
 
             // tuple<T, U, ...>
             Some((_span, Token::Tuple)) => {

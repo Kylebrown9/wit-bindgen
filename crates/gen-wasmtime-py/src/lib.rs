@@ -37,7 +37,7 @@ enum PyUnionRepresentation {
 #[derive(Default)]
 struct Imports {
     freestanding_funcs: Vec<Import>,
-    resource_funcs: BTreeMap<ResourceId, Vec<Import>>,
+    resource_funcs: BTreeMap<TypeId, Vec<Import>>,
 }
 
 struct Import {
@@ -50,7 +50,7 @@ struct Import {
 #[derive(Default)]
 struct Exports {
     freestanding_funcs: Vec<Source>,
-    resource_funcs: BTreeMap<ResourceId, Vec<Source>>,
+    resource_funcs: BTreeMap<TypeId, Vec<Source>>,
     fields: BTreeMap<String, &'static str>,
 }
 
@@ -91,7 +91,7 @@ impl WasmtimePy {
 
     /// Creates a `Source` with all of the required intrinsics
     fn intrinsics(&mut self, iface: &Interface) -> Source {
-        if iface.resources.len() > 0 {
+        if iface.resources().count() > 0 {
             self.deps.needs_resources = true;
             self.deps.pyimport("typing", "runtime_checkable");
         }
@@ -113,7 +113,6 @@ fn array_ty(iface: &Interface, ty: &Type) -> Option<&'static str> {
         Type::Float32 => Some("c_float"),
         Type::Float64 => Some("c_double"),
         Type::Char => None,
-        Type::Handle(_) => None,
         Type::String => None,
         Type::Id(id) => match &iface.types[*id].kind {
             TypeDefKind::Type(t) => array_ty(iface, t),
@@ -322,7 +321,7 @@ impl Generator for WasmtimePy {
         builder.push_str("\n");
     }
 
-    fn type_resource(&mut self, _iface: &Interface, _ty: ResourceId) {
+    fn type_resource(&mut self, _iface: &Interface, _ty: TypeId) {
         // if !self.in_import {
         //     self.exported_resources.insert(ty);
         // }
@@ -379,7 +378,7 @@ impl Generator for WasmtimePy {
         match sig.results.len() {
             0 => builder.push_str("None"),
             1 => builder.push_str(wasm_ty_typing(sig.results[0])),
-            _ => unimplemented!(),
+            _ => unimplemented!("multi-value return not supported"),
         }
         builder.push_str(":\n");
         builder.indent();
@@ -589,8 +588,8 @@ impl Generator for WasmtimePy {
         }
 
         self.src.push_str(&intrinsics);
-        for (id, r) in iface.resources.iter() {
-            let name = r.name.to_camel_case();
+        for (id, name, _) in iface.resources() {
+            let name = name.to_camel_case();
             if self.in_import {
                 self.src.push_str("@runtime_checkable\n");
                 self.src.push_str(&format!("class {}(Protocol):\n", name));
@@ -685,11 +684,11 @@ impl Generator for WasmtimePy {
             ));
             self.src.indent();
 
-            for (id, r) in iface.resources.iter() {
+            for (id, name, _) in iface.resources() {
                 self.src.push_str(&format!(
                     "_resources{}: Slab[{}] = Slab()\n",
                     id.index(),
-                    r.name.to_camel_case()
+                    name.to_camel_case()
                 ));
             }
 
@@ -708,8 +707,8 @@ impl Generator for WasmtimePy {
                 ));
             }
 
-            for (id, resource) in iface.resources.iter() {
-                let snake = resource.name.to_snake_case();
+            for (id, name, _) in iface.resources() {
+                let snake = name.to_snake_case();
 
                 self.src.push_str(&format!(
                     "def resource_drop_{}(i: int) -> None:\n  _resources{}.remove(i).drop()\n",
@@ -724,7 +723,7 @@ impl Generator for WasmtimePy {
                         'resource_drop_{}', \
                         wasmtime.Func(store, ty, resource_drop_{})\
                     )\n",
-                    resource.name, snake,
+                    name, snake,
                 ));
             }
             self.src.dedent();
@@ -736,15 +735,17 @@ impl Generator for WasmtimePy {
             self.src
                 .push_str(&format!("class {}:\n", iface.name.to_camel_case()));
             self.src.indent();
-            if iface.resources.len() == 0 {
+            let mut found_resources = false;
+            for (_, resource_name, _) in iface.resources() {
+                self.src.push_str(&format!(
+                    "_canonical_abi_drop_{}: wasmtime.Func\n",
+                    resource_name.to_snake_case(),
+                ));
+                found_resources = true;
+            }
+
+            if !found_resources {
                 self.src.push_str("pass\n");
-            } else {
-                for (_, r) in iface.resources.iter() {
-                    self.src.push_str(&format!(
-                        "_canonical_abi_drop_{}: wasmtime.Func\n",
-                        r.name.to_snake_case(),
-                    ));
-                }
             }
             self.src.dedent();
         }
@@ -759,21 +760,21 @@ impl Generator for WasmtimePy {
                 self.src
                     .push_str(&format!("_{}: {}\n", name.to_snake_case(), ty));
             }
-            for (id, r) in iface.resources.iter() {
+            for (id, name, _) in iface.resources() {
                 self.src.push_str(&format!(
                     "_resource{}_slab: Slab[{}]\n",
                     id.index(),
-                    r.name.to_camel_case(),
+                    name.to_camel_case(),
                 ));
                 self.src.push_str(&format!(
                     "_canonical_abi_drop_{}: wasmtime.Func\n",
-                    r.name.to_snake_case(),
+                    name.to_snake_case(),
                 ));
             }
 
             self.src.push_str("def __init__(self, store: wasmtime.Store, linker: wasmtime.Linker, module: wasmtime.Module):\n");
             self.src.indent();
-            for (id, r) in iface.resources.iter() {
+            for (id, name, _) in iface.resources() {
                 self.src.push_str(&format!(
                     "
                        ty1 = wasmtime.FuncType([wasmtime.ValType.i32()], [])
@@ -796,9 +797,9 @@ impl Generator for WasmtimePy {
                             return self._resource{idx}_slab.insert({camel}(val, self))
                        linker.define('canonical_abi', 'resource_new_{name}', wasmtime.Func(store, ty2, new_{snake}))
                    ",
-                    name = r.name,
-                    camel = r.name.to_camel_case(),
-                    snake = r.name.to_snake_case(),
+                    name = name,
+                    camel = name.to_camel_case(),
+                    snake = name.to_snake_case(),
                     idx = id.index(),
                 ));
             }
@@ -818,7 +819,7 @@ impl Generator for WasmtimePy {
                     ty = ty,
                 ));
             }
-            for (id, r) in iface.resources.iter() {
+            for (id, name, _) in iface.resources() {
                 self.src.push_str(&format!(
                     "
                         self._resource{idx}_slab = Slab()
@@ -827,8 +828,8 @@ impl Generator for WasmtimePy {
                         self._canonical_abi_drop_{snake} = canon_drop_{snake}
                     ",
                     idx = id.index(),
-                    name = r.name,
-                    snake = r.name.to_snake_case(),
+                    name = name,
+                    snake = name.to_snake_case(),
                 ));
             }
             self.src.dedent();
@@ -930,7 +931,7 @@ impl Bindgen for FunctionBindgen<'_> {
     }
 
     fn return_pointer(&mut self, _iface: &Interface, _size: usize, _align: usize) -> String {
-        unimplemented!()
+        unimplemented!("Python return pointer not supported")
     }
 
     fn is_list_canonical(&self, iface: &Interface, ty: &Type) -> bool {
@@ -1844,7 +1845,7 @@ fn py_type_class_of(ty: &Type) -> PyTypeClass {
         | Type::S64 => PyTypeClass::Int,
         Type::Float32 | Type::Float64 => PyTypeClass::Float,
         Type::Char | Type::String => PyTypeClass::Str,
-        Type::Handle(_) | Type::Id(_) => PyTypeClass::Custom,
+        Type::Id(_) => PyTypeClass::Custom,
     }
 }
 

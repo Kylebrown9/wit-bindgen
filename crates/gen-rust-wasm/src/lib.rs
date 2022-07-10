@@ -60,7 +60,7 @@ pub struct Opts {
 #[derive(Default)]
 struct Trait {
     methods: Vec<String>,
-    resource_methods: BTreeMap<ResourceId, Vec<String>>,
+    resource_methods: BTreeMap<TypeId, Vec<String>>,
 }
 
 impl Opts {
@@ -278,7 +278,8 @@ impl Generator for RustWasm {
         self.print_typedef_enum(id, name, enum_, docs);
     }
 
-    fn type_resource(&mut self, iface: &Interface, ty: ResourceId) {
+    fn type_resource(&mut self, iface: &Interface, ty: TypeId) {
+        let (resource_name, _) = iface.get_resource(ty);
         // For exported handles we synthesize some trait implementations
         // automatically for runtime-required traits.
         if !self.in_import {
@@ -354,9 +355,9 @@ impl Generator for RustWasm {
                         }}
                     }};
                 ",
-                ty = iface.resources[ty].name.to_camel_case(),
-                name = iface.resources[ty].name,
-                name_snake = iface.resources[ty].name.to_snake_case(),
+                ty = resource_name.to_camel_case(),
+                name = resource_name,
+                name_snake = resource_name.to_snake_case(),
                 iface = iface.name.to_camel_case(),
                 ns = self.opts.symbol_namespace,
                 panic_not_wasm = panic,
@@ -373,16 +374,15 @@ impl Generator for RustWasm {
                         drop(val);
                     }}
                 ",
-                iface.resources[ty].name.to_snake_case(),
-                iface.resources[ty].name.to_camel_case(),
+                resource_name.to_snake_case(),
+                resource_name.to_camel_case(),
             ));
             return;
         }
 
-        let resource = &iface.resources[ty];
-        let name = &resource.name;
+        let name = resource_name;
 
-        self.rustdoc(&resource.docs);
+        self.rustdoc(iface.get_type_docs(ty));
         self.src.push_str("#[derive(Debug)]\n");
         self.src.push_str("#[repr(transparent)]\n");
         self.src
@@ -478,10 +478,11 @@ impl Generator for RustWasm {
         match &func.kind {
             FunctionKind::Freestanding => {}
             FunctionKind::Static { resource, .. } | FunctionKind::Method { resource, .. } => {
+                let (name, _) = iface.get_resource(*resource);
                 sig.use_item_name = true;
                 self.src.push_str(&format!(
                     "impl {} {{\n",
-                    iface.resources[*resource].name.to_camel_case()
+                    name.to_camel_case()
                 ));
             }
         }
@@ -561,7 +562,7 @@ impl Generator for RustWasm {
                 self.src.push_str(" -> ");
                 self.wasm_type(sig.results[0]);
             }
-            _ => unimplemented!(),
+            _ => unimplemented!("multi-value return not supported"),
         }
 
         self.push_str("{\n");
@@ -654,7 +655,7 @@ impl Generator for RustWasm {
     fn finish_one(&mut self, iface: &Interface, files: &mut Files) {
         let mut src = mem::take(&mut self.src);
 
-        let any_async = iface.functions.iter().any(|f| f.is_async);
+        let any_async = iface.functions.iter().any(|(_, f)| f.is_async);
         for (name, trait_) in self.traits.iter() {
             if any_async {
                 src.push_str("#[wit_bindgen_rust::async_trait(?Send)]\n");
@@ -669,12 +670,13 @@ impl Generator for RustWasm {
             src.push_str("}\n");
 
             for (id, methods) in trait_.resource_methods.iter() {
+                let (resource_name, _) = iface.get_resource(*id);
                 if any_async {
                     src.push_str("#[wit_bindgen_rust::async_trait(?Send)]\n");
                 }
                 src.push_str(&format!(
                     "pub trait {} {{\n",
-                    iface.resources[*id].name.to_camel_case()
+                    resource_name.to_camel_case()
                 ));
                 for f in methods {
                     src.push_str(&f);
@@ -1006,9 +1008,10 @@ impl Bindgen for FunctionBindgen<'_> {
                 results.push(format!("{}.0", operands[0]));
             }
             Instruction::HandleOwnedFromI32 { ty } => {
+                let (resource_name, _) = iface.get_resource(*ty);
                 results.push(format!(
                     "{}({})",
-                    iface.resources[*ty].name.to_camel_case(),
+                    resource_name.to_camel_case(),
                     operands[0]
                 ));
             }
@@ -1556,10 +1559,11 @@ impl Bindgen for FunctionBindgen<'_> {
                     }
                     FunctionKind::Static { resource, name }
                     | FunctionKind::Method { resource, name } => {
+                        let (resource_name, _) = iface.get_resource(*resource);
                         self.push_str(&format!(
                             "<super::{r} as {r}>::{}",
                             name.to_snake_case(),
-                            r = iface.resources[*resource].name.to_camel_case(),
+                            r = resource_name.to_camel_case(),
                         ));
                     }
                 }
@@ -1673,7 +1677,7 @@ impl Bindgen for FunctionBindgen<'_> {
                 ));
             }
 
-            Instruction::Malloc { .. } => unimplemented!(),
+            Instruction::Malloc { .. } => unimplemented!("Rust WASM Malloc"),
             Instruction::Free {
                 free: _,
                 size,

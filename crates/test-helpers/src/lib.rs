@@ -62,15 +62,15 @@ pub fn codegen_rust_wasm_export(input: TokenStream) -> TokenStream {
 
     fn gen_extra(iface: &wit_parser::Interface) -> proc_macro2::TokenStream {
         let mut ret = quote::quote!();
-        if iface.resources.len() == 0 && iface.functions.len() == 0 {
+        if iface.resources().count() == 0 && iface.functions.len() == 0 {
             return ret;
         }
 
         let snake = quote::format_ident!("{}", iface.name.to_snake_case());
         let camel = quote::format_ident!("{}", iface.name.to_camel_case());
 
-        for (_, r) in iface.resources.iter() {
-            let name = quote::format_ident!("{}", r.name.to_camel_case());
+        for (_, name, _) in iface.resources() {
+            let name = quote::format_ident!("{}", name.to_camel_case());
             ret.extend(quote::quote!(pub struct #name;));
         }
 
@@ -78,7 +78,7 @@ pub fn codegen_rust_wasm_export(input: TokenStream) -> TokenStream {
         let mut resources = BTreeMap::new();
 
         let mut async_trait = quote::quote!();
-        for f in iface.functions.iter() {
+        for (_, f) in iface.functions.iter() {
             let name = quote::format_ident!("{}", f.item_name().to_snake_case());
             let mut params = f
                 .params
@@ -121,7 +121,8 @@ pub fn codegen_rust_wasm_export(input: TokenStream) -> TokenStream {
             }
         });
         for (id, methods) in resources {
-            let name = quote::format_ident!("{}", iface.resources[id].name.to_camel_case());
+            let (name, _) = iface.get_resource(id);
+            let name = quote::format_ident!("{}", name.to_camel_case());
             ret.extend(quote::quote! {
                 #async_trait
                 impl #snake::#name for #name {
@@ -153,11 +154,6 @@ pub fn codegen_rust_wasm_export(input: TokenStream) -> TokenStream {
             Type::Float64 => quote::quote! { f64 },
             Type::Char => quote::quote! { char },
             Type::String => quote::quote! { String },
-            Type::Handle(resource) => {
-                let name =
-                    quote::format_ident!("{}", iface.resources[resource].name.to_camel_case());
-                quote::quote! { wit_bindgen_rust::Handle<#name> }
-            }
             Type::Id(id) => quote_id(param, iface, id),
         }
     }
@@ -171,7 +167,10 @@ pub fn codegen_rust_wasm_export(input: TokenStream) -> TokenStream {
         if let Some(name) = &ty.name {
             let name = quote::format_ident!("{}", name.to_camel_case());
             let module = quote::format_ident!("{}", iface.name.to_snake_case());
-            return quote::quote! { #module::#name };
+            return match ty.kind {
+                TypeDefKind::Resource(_) => quote::quote! { wit_bindgen_rust::Handle<#name> },
+                _ => quote::quote! { #module::#name }
+            };
         }
         match &ty.kind {
             TypeDefKind::Type(t) => quote_ty(param, iface, t),
@@ -196,7 +195,8 @@ pub fn codegen_rust_wasm_export(input: TokenStream) -> TokenStream {
                 let ok = quote_ty(param, iface, &e.ok);
                 let err = quote_ty(param, iface, &e.err);
                 quote::quote! { Result<#ok, #err> }
-            }
+            },
+            TypeDefKind::Resource(_) => unreachable!(),
             TypeDefKind::Stream(_) => todo!("unknown stream"),
         }
     }

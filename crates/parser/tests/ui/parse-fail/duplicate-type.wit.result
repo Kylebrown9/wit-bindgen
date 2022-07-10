@@ -1,4 +1,4 @@
-type "foo" defined twice
+type "foo" previously defined as a type
      --> tests/ui/parse-fail/duplicate-type.wit:4:6
       |
     4 | type foo = s32

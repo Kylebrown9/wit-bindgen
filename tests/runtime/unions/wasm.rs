@@ -33,13 +33,18 @@ impl exports::Exports for Exports {
         assert!(matches!(add_one_integer(AllIntegers::I64(i64::MAX)), AllIntegers::I64(i64::MIN)));
 
         // All-Floats
-        assert!(matches!(add_one_float(AllFloats::F32(0.0)), AllFloats::F32(1.0)));
-        assert!(matches!(add_one_float(AllFloats::F64(0.0)), AllFloats::F64(1.0)));
+        if let AllFloats::F32(result) = add_one_float(AllFloats::F32(0.0)) {
+            assert_eq!(result, 1.0);
+        } else { panic!() }
+        if let AllFloats::F64(result) = add_one_float(AllFloats::F64(0.0)) {
+            assert_eq!(result, 1.0);
+        } else { panic!() }
 
         // All-Text
         assert!(matches!(replace_first_char(AllTextParam::Char('a'), 'z'), AllTextResult::Char('z')));
-        let rhs = "zbc".to_string();
-        assert!(matches!(replace_first_char(AllTextParam::String("abc"), 'z'), AllTextResult::String(rhs)));
+        if let AllTextResult::String(result) = replace_first_char(AllTextParam::String("abc"), 'z') {
+            assert_eq!(result, "zbc");
+        } else { panic!() }
 
         // All-Integers
         assert!(matches!(identify_integer(AllIntegers::Bool(true)), 0));
@@ -70,7 +75,9 @@ impl exports::Exports for Exports {
         assert!(matches!(identify_duplicated(DuplicatedS32::I321(0)), 2));
 
         // Distinguishable
-        assert!(matches!(add_one_distinguishable_num(DistinguishableNum::F64(0.0)), DistinguishableNum::F64(1.0)));
+        if let DistinguishableNum::F64(result) = add_one_distinguishable_num(DistinguishableNum::F64(0.0)) {
+            assert_eq!(result, 1.0);
+        } else { panic!() }
         assert!(matches!(add_one_distinguishable_num(DistinguishableNum::I64(0)), DistinguishableNum::I64(1)));
 
         assert!(matches!(identify_distinguishable_num(DistinguishableNum::F64(0.0)), 0));
@@ -103,7 +110,7 @@ impl exports::Exports for Exports {
 
     fn replace_first_char(text: AllText, letter: char) -> AllText {
         match text {
-            AllText::Char(c) => AllText::Char(letter),
+            AllText::Char(_c) => AllText::Char(letter),
             AllText::String(s) => AllText::String(format!("{}{}", letter, &s[1..]))
         }
     }

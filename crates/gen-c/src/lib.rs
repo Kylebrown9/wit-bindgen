@@ -174,6 +174,7 @@ impl C {
                 TypeDefKind::Flags(_) => false,
                 TypeDefKind::Tuple(_) | TypeDefKind::Record(_) | TypeDefKind::List(_) => true,
                 TypeDefKind::Stream(_) => todo!("is_arg_by_pointer for stream"),
+                TypeDefKind::Resource(_) => false,
             },
             Type::String => true,
             _ => false,
@@ -228,11 +229,6 @@ impl C {
             Type::S64 => self.src.h("int64_t"),
             Type::Float32 => self.src.h("float"),
             Type::Float64 => self.src.h("double"),
-            Type::Handle(id) => {
-                self.print_namespace(iface);
-                self.src.h(&iface.resources[*id].name.to_snake_case());
-                self.src.h("_t");
-            }
             Type::String => {
                 self.print_namespace(iface);
                 self.src.h("string_t");
@@ -276,7 +272,6 @@ impl C {
             Type::S64 => self.src.h("s64"),
             Type::Float32 => self.src.h("float32"),
             Type::Float64 => self.src.h("float64"),
-            Type::Handle(id) => self.src.h(&iface.resources[*id].name.to_snake_case()),
             Type::String => self.src.h("string"),
             Type::Id(id) => {
                 let ty = &iface.types[*id];
@@ -290,7 +285,7 @@ impl C {
                     | TypeDefKind::Enum(_)
                     | TypeDefKind::Variant(_)
                     | TypeDefKind::Union(_) => {
-                        unimplemented!()
+                        unimplemented!("C names for algebraic types not supported")
                     }
                     TypeDefKind::Tuple(t) => {
                         self.src.h("tuple");
@@ -319,7 +314,8 @@ impl C {
                         self.print_ty_name(iface, &s.element);
                         self.src.h("_");
                         self.print_ty_name(iface, &s.end);
-                    }
+                    },
+                    TypeDefKind::Resource(_) => unreachable!("Resources must always have names")
                 }
             }
         }
@@ -378,6 +374,7 @@ impl C {
                 self.src.h("size_t len;\n");
                 self.src.h("}");
             }
+            TypeDefKind::Resource(_) => todo!("print_anonymous_type for resource"),
             TypeDefKind::Stream(_) => todo!("print_anonymous_type for stream"),
         }
         self.src.h(" ");
@@ -541,6 +538,7 @@ impl C {
                 self.src.c("}\n");
             }
             TypeDefKind::Stream(_) => todo!("print_dtor for stream"),
+            TypeDefKind::Resource(_) => todo!("print_dtor for resource")
         }
         self.src.c("}\n");
     }
@@ -549,7 +547,6 @@ impl C {
         let id = match ty {
             Type::Id(id) => *id,
             Type::String => return true,
-            Type::Handle(_) => return true,
             _ => return false,
         };
         match &iface.types[id].kind {
@@ -567,7 +564,8 @@ impl C {
             TypeDefKind::Option(t) => self.owns_anything(iface, t),
             TypeDefKind::Expected(e) => {
                 self.owns_anything(iface, &e.ok) || self.owns_anything(iface, &e.err)
-            }
+            },
+            TypeDefKind::Resource(_) => true,
             TypeDefKind::Stream(_) => todo!("owns_anything for stream"),
         }
     }
@@ -669,6 +667,9 @@ impl Return {
             TypeDefKind::Variant(_) | TypeDefKind::Union(_) => {
                 self.retptrs.push(*orig_ty);
             }
+            TypeDefKind::Resource(_) => {
+                self.scalar = Some(Scalar::Type(*orig_ty));
+            },
             TypeDefKind::Stream(_) => todo!("return_single for stream"),
         }
     }
@@ -933,7 +934,7 @@ impl Generator for C {
         self.types.insert(id, mem::replace(&mut self.src.h, prev));
     }
 
-    fn type_resource(&mut self, iface: &Interface, ty: ResourceId) {
+    fn type_resource(&mut self, iface: &Interface, ty: TypeId) {
         drop((iface, ty));
     }
 
@@ -1132,9 +1133,9 @@ impl Generator for C {
 
         self.print_intrinsics();
 
-        for (_, resource) in iface.resources.iter() {
+        for (_, resource_name, _) in iface.resources() {
             let ns = iface.name.to_snake_case();
-            let name = resource.name.to_snake_case();
+            let name = resource_name.to_snake_case();
             uwrite!(
                 self.src.h,
                 "
@@ -1166,7 +1167,7 @@ impl Generator for C {
                 ",
                 ns = ns,
                 name = name,
-                name_orig = resource.name,
+                name_orig = resource_name,
             );
 
             // Exported resources have more capabilities, they can create new
@@ -1211,7 +1212,7 @@ impl Generator for C {
                     ",
                     ns = ns,
                     name = name,
-                    name_orig = resource.name,
+                    name_orig = resource_name,
                 );
             }
         }
@@ -1544,10 +1545,11 @@ impl Bindgen for FunctionBindgen<'_> {
 
             Instruction::HandleBorrowedFromI32 { ty, .. }
             | Instruction::HandleOwnedFromI32 { ty, .. } => {
+                let (resource_name, _) = iface.get_resource(*ty);
                 results.push(format!(
                     "({}_{}_t){{ {} }}",
                     iface.name.to_snake_case(),
-                    iface.resources[*ty].name.to_snake_case(),
+                    resource_name.to_snake_case(),
                     operands[0],
                 ));
             }
@@ -1993,7 +1995,7 @@ impl Bindgen for FunctionBindgen<'_> {
                         uwrite!(self.src, " {} = ", ret);
                         results.push(ret);
                     }
-                    _ => unimplemented!(),
+                    _ => unimplemented!("multi-value return not supported"),
                 }
                 self.src.push_str(self.func_to_call);
                 self.src.push_str("(");

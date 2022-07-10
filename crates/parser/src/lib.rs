@@ -27,18 +27,36 @@ pub struct Interface {
     /// name of `<module>#<name>` for exports or an import module
     /// name of `<module>` for imports.
     pub module: Option<String>,
+
+    pub name_lookup: HashMap<String, Definition>,
     pub types: Arena<TypeDef>,
-    pub type_lookup: HashMap<String, TypeId>,
-    pub resources: Arena<Resource>,
-    pub resource_lookup: HashMap<String, ResourceId>,
-    pub interfaces: Arena<Interface>,
+    pub functions: Arena<Function>,
+    pub globals: Arena<Global>,
+
     pub interface_lookup: HashMap<String, InterfaceId>,
-    pub functions: Vec<Function>,
-    pub globals: Vec<Global>,
+    pub interfaces: Arena<Interface>,
+}
+
+#[derive(Debug)]
+pub enum Definition {
+    Type(TypeId),
+    Function(FunctionId),
+    Global(GlobalId),
+}
+
+impl Definition {
+    fn describe(&self) -> &'static str {
+        match self {
+            Definition::Type(_) => "type",
+            Definition::Function(_) => "function",
+            Definition::Global(_) => "global value",
+        }
+    }
 }
 
 pub type TypeId = Id<TypeDef>;
-pub type ResourceId = Id<Resource>;
+pub type FunctionId = Id<Function>;
+pub type GlobalId = Id<Global>;
 pub type InterfaceId = Id<Interface>;
 
 #[derive(Debug)]
@@ -62,6 +80,7 @@ pub enum TypeDefKind {
     Expected(Expected),
     Union(Union),
     List(Type),
+    Resource(Resource),
     Stream(Stream),
     Type(Type),
 }
@@ -82,7 +101,6 @@ pub enum Type {
     Float64,
     Char,
     String,
-    Handle(ResourceId),
     Id(TypeId),
 }
 
@@ -233,13 +251,9 @@ pub struct Docs {
     pub contents: Option<String>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct Resource {
-    pub docs: Docs,
-    pub name: String,
-    /// `None` if this resource is defined within the containing instance,
-    /// otherwise `Some` if it's defined in an instance named here.
-    pub foreign_module: Option<String>,
+    pub functions: HashMap<String, FunctionId>
 }
 
 #[derive(Debug)]
@@ -259,11 +273,11 @@ pub struct Function {
     pub result: Type,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum FunctionKind {
     Freestanding,
-    Static { resource: ResourceId, name: String },
-    Method { resource: ResourceId, name: String },
+    Static { resource: TypeId, name: String },
+    Method { resource: TypeId, name: String },
 }
 
 impl Function {
@@ -435,6 +449,7 @@ impl Interface {
                     self.topo_visit_ty(&t.ty, list, visited);
                 }
             }
+            TypeDefKind::Resource(_) => {}, // TODO-Kyle
             TypeDefKind::Stream(s) => {
                 self.topo_visit_ty(&s.element, list, visited);
                 self.topo_visit_ty(&s.end, list, visited);
@@ -463,7 +478,7 @@ impl Interface {
             | Type::Float32
             | Type::Float64 => true,
 
-            Type::Bool | Type::Char | Type::Handle(_) | Type::String => false,
+            Type::Bool | Type::Char | Type::String => false,
 
             Type::Id(id) => match &self.types[*id].kind {
                 TypeDefKind::List(_)
@@ -471,6 +486,7 @@ impl Interface {
                 | TypeDefKind::Enum(_)
                 | TypeDefKind::Option(_)
                 | TypeDefKind::Expected(_)
+                | TypeDefKind::Resource(_)
                 | TypeDefKind::Stream(_)
                 | TypeDefKind::Union(_) => false,
                 TypeDefKind::Type(t) => self.all_bits_valid(t),
@@ -494,6 +510,36 @@ impl Interface {
         } else {
             None
         }
+    }
+
+    #[inline(always)]
+    pub fn get_type_docs(&self, id: TypeId) -> &Docs {
+        &self.types[id].docs
+    }
+
+    #[inline(always)]
+    pub fn get_resource(&self, id: TypeId) -> (&str, &Resource) {
+        let type_def = &self.types[id];
+        if let TypeDefKind::Resource(r) = &type_def.kind {
+            let name = type_def.name.as_ref().expect("All resources must have names").as_str();
+            (name, r)
+        } else {
+            panic!("Id does not represent a resource");
+        }
+    }
+
+    // TODO-Kyle: rename to iter_resources
+    #[inline(always)]
+    pub fn resources(&self) -> impl Iterator<Item=(TypeId, &str, &Resource)> + '_ {
+        self.types.iter()
+            .filter_map(|(id, type_def)| {
+                if let TypeDefKind::Resource(r) = &type_def.kind {
+                    let name = type_def.name.as_ref().expect("All resources must have names").as_str();
+                    Some((id, name, r))
+                } else {
+                    None
+                }
+            })
     }
 }
 

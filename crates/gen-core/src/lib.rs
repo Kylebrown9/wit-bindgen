@@ -84,7 +84,7 @@ pub trait Generator {
     );
     fn type_union(&mut self, iface: &Interface, id: TypeId, name: &str, union: &Union, docs: &Docs);
     fn type_enum(&mut self, iface: &Interface, id: TypeId, name: &str, enum_: &Enum, docs: &Docs);
-    fn type_resource(&mut self, iface: &Interface, ty: ResourceId);
+    fn type_resource(&mut self, iface: &Interface, id: TypeId);
     fn type_alias(&mut self, iface: &Interface, id: TypeId, name: &str, ty: &Type, docs: &Docs);
     fn type_list(&mut self, iface: &Interface, id: TypeId, name: &str, ty: &Type, docs: &Docs);
     fn type_builtin(&mut self, iface: &Interface, id: TypeId, name: &str, ty: &Type, docs: &Docs);
@@ -126,17 +126,18 @@ pub trait Generator {
                 TypeDefKind::Union(u) => self.type_union(iface, id, name, u, &ty.docs),
                 TypeDefKind::List(t) => self.type_list(iface, id, name, t, &ty.docs),
                 TypeDefKind::Type(t) => self.type_alias(iface, id, name, t, &ty.docs),
+                TypeDefKind::Resource(_) => {}, // Handled below
                 TypeDefKind::Stream(_) => todo!("generate for stream"),
             }
         }
 
-        for (id, _resource) in iface.resources.iter() {
+        for (id, _, _) in iface.resources() {
             self.type_resource(iface, id);
         }
 
         self.preprocess_functions(iface, dir);
 
-        for f in iface.functions.iter() {
+        for (_, f) in iface.functions.iter() {
             match dir {
                 Direction::Import => self.import(iface, &f),
                 Direction::Export => self.export(iface, &f),
@@ -199,7 +200,7 @@ impl Types {
         for (t, _) in iface.types.iter() {
             self.type_id_info(iface, t);
         }
-        for f in iface.functions.iter() {
+        for (_, f) in iface.functions.iter() {
             for (_, ty) in f.params.iter() {
                 self.set_param_result_ty(iface, ty, true, false);
             }
@@ -253,6 +254,9 @@ impl Types {
                     info |= self.type_info(iface, &case.ty);
                 }
             }
+            TypeDefKind::Resource(_) => {
+                info.has_handle = true;
+            }
             TypeDefKind::Stream(_) => todo!("type_id_info for stream"),
         }
         self.type_info.insert(ty, info);
@@ -262,7 +266,6 @@ impl Types {
     pub fn type_info(&mut self, iface: &Interface, ty: &Type) -> TypeInfo {
         let mut info = TypeInfo::default();
         match ty {
-            Type::Handle(_) => info.has_handle = true,
             Type::String => info.has_list = true,
             Type::Id(id) => return self.type_id_info(iface, *id),
             _ => {}
@@ -301,6 +304,7 @@ impl Types {
                     self.set_param_result_ty(iface, &case.ty, param, result)
                 }
             }
+            TypeDefKind::Resource(_) => {}, //TODO-Kyle
             TypeDefKind::Stream(_) => todo!("set_param_result_id for stream"),
         }
     }
